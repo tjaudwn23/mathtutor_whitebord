@@ -722,6 +722,10 @@ class _WhiteBoard extends StatefulWidget {
 class _WhiteBoardState extends State<_WhiteBoard> {
   bool panMode = false;
   late final TransformationController transformationController;
+  ui.Image? cachedStrokesImage; // 완성된 스트로크를 이미지로 캐싱
+  Map<String, int> lastCachedLimitCursor =
+      {}; // 마지막으로 캐시된 limitCursor 추적 (사용자별)
+  Size? _whiteboardSize; // 화이트보드의 실제 크기 저장
 
   @override
   void initState() {
@@ -742,6 +746,7 @@ class _WhiteBoardState extends State<_WhiteBoard> {
 
   @override
   void dispose() {
+    cachedStrokesImage?.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: [
       SystemUiOverlay.top,
       SystemUiOverlay.bottom,
@@ -751,6 +756,46 @@ class _WhiteBoardState extends State<_WhiteBoard> {
 
   @override
   Widget build(BuildContext context) {
+    // 화이트보드 크기 계산 및 저장 (실제 렌더링 크기)
+    final whiteboardSize = Size(
+      MediaQuery.of(context).size.width,
+      MediaQuery.of(context).size.height * 4,
+    );
+    _whiteboardSize = whiteboardSize;
+
+    // Undo/Redo 시 캐시 무효화 체크
+    for (final entry in widget.userLimitCursor.entries) {
+      final userID = entry.key;
+      final currentLimit = entry.value;
+      final lastCached = lastCachedLimitCursor[userID] ?? 0;
+
+      // limitCursor가 감소하면 (Undo) 캐시를 무효화
+      if (currentLimit < lastCached) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            _invalidateCache();
+          }
+        });
+        break;
+      }
+    }
+
+    // Clear 시 캐시 무효화 체크
+    bool allEmpty = true;
+    for (final entry in widget.userDrawingData.entries) {
+      if (entry.value.isNotEmpty) {
+        allEmpty = false;
+        break;
+      }
+    }
+    if (allEmpty && cachedStrokesImage != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _invalidateCache();
+        }
+      });
+    }
+
     return LayoutBuilder(builder: (context, constraints) {
       return Scaffold(
         floatingActionButtonLocation: FloatingActionButtonLocation.startFloat,
@@ -818,10 +863,14 @@ class _WhiteBoardState extends State<_WhiteBoard> {
                   }
                   if (!widget.controller.isStylusMode) {
                     widget.onEndDrawing(event);
+                    // 손을 뗄 때 완성된 스트로크를 이미지로 변환
+                    _cacheCompletedStrokes();
                   } else {
                     if (event.kind == PointerDeviceKind.invertedStylus ||
                         event.kind == PointerDeviceKind.stylus) {
                       widget.onEndDrawing(event);
+                      // 손을 뗄 때 완성된 스트로크를 이미지로 변환
+                      _cacheCompletedStrokes();
                     }
                   }
                 }
@@ -831,17 +880,37 @@ class _WhiteBoardState extends State<_WhiteBoard> {
                 width: MediaQuery.of(context).size.width,
                 child: Stack(
                   children: [
-                    Positioned.fill(
-                        child: CustomPaint(
-                      isComplex: true,
-                      foregroundPainter: _WhiteboardPainter(
-                          _makeRealDrawingData(), widget.backgroundImage),
-                      size: Size(
-                          MediaQuery.of(context).size.height * 9 / (16 * 4),
-                          MediaQuery.of(context).size.height),
-                      child: Container(
-                        color: Colors.transparent,
-                      ),
+                    Positioned.fill(child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        // 실제 렌더링 크기를 사용하여 이미지 생성 시 동일한 크기 사용
+                        final actualSize = Size(
+                          constraints.maxWidth,
+                          constraints.maxHeight,
+                        );
+                        // 첫 렌더링 시 또는 크기가 변경되었을 때만 업데이트
+                        if (_whiteboardSize == null ||
+                            (_whiteboardSize!.width != actualSize.width ||
+                                _whiteboardSize!.height != actualSize.height)) {
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (mounted) {
+                              _whiteboardSize = actualSize;
+                              // 크기가 변경되면 캐시 무효화
+                              _invalidateCache();
+                            }
+                          });
+                        }
+                        return CustomPaint(
+                          isComplex: true,
+                          foregroundPainter: _WhiteboardPainter(
+                              _makeRealDrawingData(),
+                              widget.backgroundImage,
+                              cachedStrokesImage),
+                          size: actualSize,
+                          child: Container(
+                            color: Colors.transparent,
+                          ),
+                        );
+                      },
                     ))
                   ],
                 ),
@@ -857,6 +926,7 @@ class _WhiteBoardState extends State<_WhiteBoard> {
     /// limitCursor 이전의 스트로크들만 그리되
     /// limitCursor 이전의 key값이 [deletedStrokes]에 존재한다면
     /// [deletedStrokes]의 value값에 해당하는 index를 지워줍니다.
+    /// 완성된 스트로크는 이미지로 캐싱되므로, 현재 그려지는 스트로크만 반환합니다.
     final Map<String, List<List<DrawingData>>> realDrawingData = {};
 
     /// 유저 별로 그림을 따로 그려줍니다.
@@ -864,29 +934,227 @@ class _WhiteBoardState extends State<_WhiteBoard> {
       /// 유저 ID를 먼저 가져옵니다.
       final userID = drawingData.key;
 
-      /// 해당 유저의 limitCursor 이전의 스트로크들을 가져옵니다.
-      final drawingBeforeLimitCursor = widget.userDrawingData[userID]!
-          .sublist(0, widget.userLimitCursor[userID]!);
-      for (int i = 0; i < drawingBeforeLimitCursor.length; i++) {
-        for (final deleteStroke in widget.userDeletedStrokes[userID]!.entries) {
-          if (deleteStroke.key <= widget.userLimitCursor[userID]!) {
-            drawingBeforeLimitCursor[deleteStroke.value] = [];
+      /// 완성된 스트로크는 이미지로 캐싱되므로,
+      /// 마지막으로 캐시된 limitCursor 이후의 스트로크만 반환합니다.
+      final startIndex = lastCachedLimitCursor[userID] ?? 0;
+      final endIndex = widget.userLimitCursor[userID]!;
+
+      if (startIndex < endIndex) {
+        final currentStrokes =
+            widget.userDrawingData[userID]!.sublist(startIndex, endIndex);
+
+        // 삭제된 스트로크 처리
+        for (int i = 0; i < currentStrokes.length; i++) {
+          for (final deleteStroke
+              in widget.userDeletedStrokes[userID]!.entries) {
+            if (deleteStroke.key <= widget.userLimitCursor[userID]!) {
+              final strokeIndex = deleteStroke.value;
+              if (strokeIndex >= startIndex && strokeIndex < endIndex) {
+                currentStrokes[strokeIndex - startIndex] = [];
+              }
+            }
           }
         }
+        realDrawingData[userID] = currentStrokes;
+      } else {
+        realDrawingData[userID] = [];
       }
-      realDrawingData[userID] = drawingBeforeLimitCursor;
     }
     return realDrawingData;
+  }
+
+  /// 완성된 스트로크를 이미지로 변환하여 캐싱합니다.
+  /// 이렇게 하면 많은 스트로크가 있어도 성능 저하를 방지할 수 있습니다.
+  Future<void> _cacheCompletedStrokes() async {
+    if (!mounted || _whiteboardSize == null) return;
+
+    // CustomPaint의 실제 크기 사용
+    final size = _whiteboardSize!;
+
+    // 모든 사용자의 완성된 스트로크 데이터 준비
+    final Map<String, List<List<DrawingData>>> completedStrokes = {};
+    bool hasNewStrokes = false;
+
+    for (final entry in widget.userDrawingData.entries) {
+      final userID = entry.key;
+      final lastCached = lastCachedLimitCursor[userID] ?? 0;
+      final currentLimit = widget.userLimitCursor[userID] ?? 0;
+
+      if (currentLimit > lastCached) {
+        hasNewStrokes = true;
+        // 완성된 스트로크만 가져오기 (마지막 캐시 이후 ~ 현재 limitCursor 이전)
+        final completed = entry.value.sublist(lastCached, currentLimit);
+
+        // 삭제된 스트로크 처리
+        final processedStrokes = <List<DrawingData>>[];
+        for (int i = 0; i < completed.length; i++) {
+          final strokeIndex = lastCached + i;
+          bool isDeleted = false;
+          for (final deleteStroke
+              in widget.userDeletedStrokes[userID]!.entries) {
+            if (deleteStroke.key <= currentLimit &&
+                deleteStroke.value == strokeIndex) {
+              isDeleted = true;
+              break;
+            }
+          }
+          if (!isDeleted) {
+            processedStrokes.add(completed[i]);
+          } else {
+            processedStrokes.add([]);
+          }
+        }
+        completedStrokes[userID] = processedStrokes;
+      }
+    }
+
+    if (!hasNewStrokes) {
+      return;
+    }
+
+    // devicePixelRatio를 고려하여 고해상도 이미지 생성
+    final devicePixelRatio = View.of(context).devicePixelRatio;
+    final imageWidth = (size.width * devicePixelRatio).toInt();
+    final imageHeight = (size.height * devicePixelRatio).toInt();
+
+    // 이미지를 비동기로 생성
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    // 고해상도 캔버스로 스케일링
+    canvas.scale(devicePixelRatio, devicePixelRatio);
+
+    // 기존 캐시된 이미지가 있으면 먼저 그리기
+    if (cachedStrokesImage != null) {
+      paintImage(
+        canvas: canvas,
+        rect: Offset.zero & size,
+        image: cachedStrokesImage!,
+        alignment: Alignment.topLeft,
+        fit: BoxFit.fill, // 전체 영역을 채우도록 수정
+        filterQuality: FilterQuality.none, // 선명도 유지
+      );
+    }
+
+    // 새로운 완성된 스트로크 그리기
+    canvas.saveLayer(Offset.zero & size, Paint());
+    for (final drawingData in completedStrokes.values) {
+      for (final stroke in drawingData) {
+        if (stroke.isEmpty) {
+          continue;
+        }
+        final strokePaint = Paint()
+          ..color = stroke.first.penType != PenType.highlighter
+              ? stroke.first.color
+              : stroke.first.color.withOpacity(0.5)
+          ..strokeCap = stroke.first.penType == PenType.pen
+              ? StrokeCap.round
+              : StrokeCap.square
+          ..style = PaintingStyle.fill
+          ..strokeWidth = stroke.first.strokeWidth
+          ..isAntiAlias = true; // 안티앨리어싱으로 선명도 향상
+
+        if (stroke.first.penType == PenType.penEraser) {
+          strokePaint.blendMode = BlendMode.clear;
+          strokePaint.style = PaintingStyle.stroke;
+        }
+
+        final points = getStroke(
+          stroke.map((e) => e.point).toList(),
+          options: StrokeOptions(
+            size: stroke.first.strokeWidth,
+            thinning: stroke.first.penType == PenType.pen ? 0.5 : 0.0,
+          ),
+        );
+        final path = Path();
+        if (points.isEmpty) {
+          continue;
+        } else if (points.length == 1) {
+          path.addOval(Rect.fromCircle(
+              center: Offset(points[0].dx, points[0].dy),
+              radius: stroke.first.strokeWidth));
+        } else {
+          // 부드러운 곡선을 위해 quadraticBezierTo 사용
+          path.moveTo(points[0].dx, points[0].dy);
+          if (points.length == 2) {
+            // 점이 2개만 있으면 직선으로 연결
+            path.lineTo(points[1].dx, points[1].dy);
+          } else {
+            // 3개 이상의 점이 있으면 곡선으로 연결
+            for (int i = 1; i < points.length; i++) {
+              if (i == 1) {
+                // 첫 번째 점은 직선으로
+                path.lineTo(points[i].dx, points[i].dy);
+              } else if (i < points.length - 1) {
+                // 중간 점들은 이전 점과 현재 점의 중점을 제어점으로 사용하여 부드러운 곡선 생성
+                final prev = points[i - 1];
+                final curr = points[i];
+                final controlX = (prev.dx + curr.dx) / 2;
+                final controlY = (prev.dy + curr.dy) / 2;
+                path.quadraticBezierTo(
+                  controlX,
+                  controlY,
+                  curr.dx,
+                  curr.dy,
+                );
+              } else {
+                // 마지막 점
+                path.lineTo(points[i].dx, points[i].dy);
+              }
+            }
+          }
+        }
+        canvas.drawPath(path, strokePaint);
+      }
+    }
+    canvas.restore();
+
+    // 이미지로 변환 (고해상도)
+    final picture = recorder.endRecording();
+
+    // 이미지 크기가 유효한지 확인
+    if (imageWidth <= 0 || imageHeight <= 0) {
+      picture.dispose();
+      return;
+    }
+
+    final image = await picture.toImage(imageWidth, imageHeight);
+    picture.dispose();
+
+    // 기존 이미지 해제 및 새 이미지로 교체
+    final oldImage = cachedStrokesImage;
+    cachedStrokesImage = image;
+    oldImage?.dispose();
+
+    // 마지막 캐시된 limitCursor 업데이트 (setState 없이 직접 업데이트)
+    if (mounted) {
+      for (final entry in widget.userDrawingData.entries) {
+        final userID = entry.key;
+        lastCachedLimitCursor[userID] = widget.userLimitCursor[userID] ?? 0;
+      }
+      // UI 업데이트를 위해 setState 호출
+      setState(() {});
+    }
+  }
+
+  /// Undo/Redo 시 캐시를 재생성합니다.
+  void _invalidateCache() {
+    cachedStrokesImage?.dispose();
+    cachedStrokesImage = null;
+    lastCachedLimitCursor.clear();
   }
 }
 
 class _WhiteboardPainter extends CustomPainter {
   final Map<String, List<List<DrawingData>>> userDrawingData;
   final ui.Image? backgroundImage;
+  final ui.Image? cachedStrokesImage;
 
-  _WhiteboardPainter(this.userDrawingData, [this.backgroundImage]);
+  _WhiteboardPainter(this.userDrawingData,
+      [this.backgroundImage, this.cachedStrokesImage]);
   @override
   void paint(Canvas canvas, Size size) {
+    // 배경 이미지 그리기
     if (backgroundImage != null) {
       paintImage(
         canvas: canvas,
@@ -897,6 +1165,19 @@ class _WhiteboardPainter extends CustomPainter {
       );
     }
 
+    // 캐시된 완성된 스트로크 이미지 그리기
+    if (cachedStrokesImage != null) {
+      paintImage(
+        canvas: canvas,
+        rect: Offset.zero & size,
+        image: cachedStrokesImage!,
+        alignment: Alignment.topLeft,
+        fit: BoxFit.fill, // 전체 영역을 채우도록 수정
+        filterQuality: FilterQuality.none, // 선명도 유지 (고해상도 이미지이므로)
+      );
+    }
+
+    // 현재 그려지는 스트로크만 실시간으로 그리기
     canvas.saveLayer(Offset.zero & size, Paint());
     for (final drawingData in userDrawingData.values) {
       for (final stroke in drawingData) {
@@ -911,7 +1192,8 @@ class _WhiteboardPainter extends CustomPainter {
               ? StrokeCap.round
               : StrokeCap.square
           ..style = PaintingStyle.fill
-          ..strokeWidth = stroke.first.strokeWidth;
+          ..strokeWidth = stroke.first.strokeWidth
+          ..isAntiAlias = true; // 안티앨리어싱으로 선명도 향상
 
         if (stroke.first.penType == PenType.penEraser) {
           paint.blendMode = BlendMode.clear;
@@ -933,10 +1215,34 @@ class _WhiteboardPainter extends CustomPainter {
               center: Offset(points[0].dx, points[0].dy),
               radius: stroke.first.strokeWidth));
         } else {
+          // 부드러운 곡선을 위해 quadraticBezierTo 사용
           path.moveTo(points[0].dx, points[0].dy);
-          for (int i = 1; i < points.length - 1; ++i) {
-            final p0 = points[i];
-            path.lineTo(p0.dx, p0.dy);
+          if (points.length == 2) {
+            // 점이 2개만 있으면 직선으로 연결
+            path.lineTo(points[1].dx, points[1].dy);
+          } else {
+            // 3개 이상의 점이 있으면 곡선으로 연결
+            for (int i = 1; i < points.length; i++) {
+              if (i == 1) {
+                // 첫 번째 점은 직선으로
+                path.lineTo(points[i].dx, points[i].dy);
+              } else if (i < points.length - 1) {
+                // 중간 점들은 이전 점과 현재 점의 중점을 제어점으로 사용하여 부드러운 곡선 생성
+                final prev = points[i - 1];
+                final curr = points[i];
+                final controlX = (prev.dx + curr.dx) / 2;
+                final controlY = (prev.dy + curr.dy) / 2;
+                path.quadraticBezierTo(
+                  controlX,
+                  controlY,
+                  curr.dx,
+                  curr.dy,
+                );
+              } else {
+                // 마지막 점
+                path.lineTo(points[i].dx, points[i].dy);
+              }
+            }
           }
           canvas.drawPath(path, paint);
         }

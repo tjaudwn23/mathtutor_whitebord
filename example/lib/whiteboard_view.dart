@@ -28,11 +28,11 @@ class WhiteboardView extends StatefulWidget {
   final String? hostID;
 
   const WhiteboardView({
-    Key? key,
+    super.key,
     required this.mode,
     required this.me,
     this.hostID,
-  }) : super(key: key);
+  });
 
   @override
   State<WhiteboardView> createState() => _WhiteboardViewState();
