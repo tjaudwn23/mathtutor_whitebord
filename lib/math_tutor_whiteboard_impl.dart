@@ -359,6 +359,7 @@ class _MathTutorWhiteboardState extends ConsumerState<MathTutorWhiteboardImpl> {
                 }),
             Expanded(
               child: _WhiteBoard(
+                key: _whiteBoardKey,
                 onStartDrawing: _onStartDrawing,
                 userDeletedStrokes: userDeletedStrokes,
                 transformationController: transformationController,
@@ -372,6 +373,8 @@ class _MathTutorWhiteboardState extends ConsumerState<MathTutorWhiteboardImpl> {
                 drawable: drawable,
                 isSpannable:
                     widget.enabledFeatures.contains(WhiteboardFeature.span),
+                penType: penType,
+                onInvalidateCache: _onInvalidateCache,
               ),
             )
           ],
@@ -450,6 +453,8 @@ class _MathTutorWhiteboardState extends ConsumerState<MathTutorWhiteboardImpl> {
       penType = PenType.penEraser;
       log('eraser selected');
     });
+    // 지우개 모드로 전환 시 캐시를 무효화하여 모든 스트로크를 다시 그리도록 함
+    _onInvalidateCache();
   }
 
   void _onTapStrokeEraswer() {
@@ -457,6 +462,17 @@ class _MathTutorWhiteboardState extends ConsumerState<MathTutorWhiteboardImpl> {
       penType = PenType.strokeEraser;
       log('stroke eraser selected');
     });
+    // 지우개 모드로 전환 시 캐시를 무효화하여 모든 스트로크를 다시 그리도록 함
+    _onInvalidateCache();
+  }
+
+  // _WhiteBoardState의 캐시를 무효화하기 위한 GlobalKey 사용
+  final GlobalKey<_WhiteBoardState> _whiteBoardKey =
+      GlobalKey<_WhiteBoardState>();
+
+  void _onInvalidateCache() {
+    // _WhiteBoardState의 캐시를 무효화
+    _whiteBoardKey.currentState?.invalidateCache();
   }
 
   void _onPenSelected(PenType type) {
@@ -701,8 +717,11 @@ class _WhiteBoard extends StatefulWidget {
   final bool drawable;
   final bool isSpannable;
   final WhiteboardController controller;
+  final PenType penType;
+  final VoidCallback? onInvalidateCache;
   const _WhiteBoard(
-      {required this.onStartDrawing,
+      {super.key,
+      required this.onStartDrawing,
       required this.onDrawing,
       required this.onEndDrawing,
       this.backgroundImage,
@@ -713,7 +732,9 @@ class _WhiteBoard extends StatefulWidget {
       required this.transformationController,
       required this.drawable,
       required this.isSpannable,
-      required this.controller});
+      required this.controller,
+      required this.penType,
+      this.onInvalidateCache});
 
   @override
   State<_WhiteBoard> createState() => _WhiteBoardState();
@@ -742,6 +763,17 @@ class _WhiteBoardState extends State<_WhiteBoard> {
       ]);
     });
     super.initState();
+  }
+
+  @override
+  void didUpdateWidget(_WhiteBoard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 지우개 모드로 전환되면 캐시를 무효화
+    if (oldWidget.penType != widget.penType &&
+        (widget.penType == PenType.penEraser ||
+            widget.penType == PenType.strokeEraser)) {
+      _invalidateCache();
+    }
   }
 
   @override
@@ -871,14 +903,22 @@ class _WhiteBoardState extends State<_WhiteBoard> {
                   }
                   if (!widget.controller.isStylusMode) {
                     widget.onEndDrawing(event);
-                    // 손을 뗄 때 완성된 스트로크를 이미지로 변환
-                    _cacheCompletedStrokes();
+                    // 지우개 모드가 아닐 때만 완성된 스트로크를 이미지로 변환
+                    // 지우개 모드에서는 모든 스트로크를 실시간으로 그려야 하므로 캐싱하지 않음
+                    if (widget.penType != PenType.penEraser &&
+                        widget.penType != PenType.strokeEraser) {
+                      _cacheCompletedStrokes();
+                    }
                   } else {
                     if (event.kind == PointerDeviceKind.invertedStylus ||
                         event.kind == PointerDeviceKind.stylus) {
                       widget.onEndDrawing(event);
-                      // 손을 뗄 때 완성된 스트로크를 이미지로 변환
-                      _cacheCompletedStrokes();
+                      // 지우개 모드가 아닐 때만 완성된 스트로크를 이미지로 변환
+                      // 지우개 모드에서는 모든 스트로크를 실시간으로 그려야 하므로 캐싱하지 않음
+                      if (widget.penType != PenType.penEraser &&
+                          widget.penType != PenType.strokeEraser) {
+                        _cacheCompletedStrokes();
+                      }
                     }
                   }
                 }
@@ -912,7 +952,11 @@ class _WhiteBoardState extends State<_WhiteBoard> {
                           foregroundPainter: _WhiteboardPainter(
                               _makeRealDrawingData(),
                               widget.backgroundImage,
-                              cachedStrokesImage),
+                              // 지우개 모드일 때는 캐시된 이미지를 사용하지 않음
+                              (widget.penType == PenType.penEraser ||
+                                      widget.penType == PenType.strokeEraser)
+                                  ? null
+                                  : cachedStrokesImage),
                           size: actualSize,
                           child: Container(
                             color: Colors.transparent,
@@ -935,6 +979,7 @@ class _WhiteBoardState extends State<_WhiteBoard> {
     /// limitCursor 이전의 key값이 [deletedStrokes]에 존재한다면
     /// [deletedStrokes]의 value값에 해당하는 index를 지워줍니다.
     /// 완성된 스트로크는 이미지로 캐싱되므로, 현재 그려지는 스트로크만 반환합니다.
+    /// 단, 지우개 모드일 때는 모든 스트로크를 반환하여 지우개가 작동할 수 있도록 합니다.
     final Map<String, List<List<DrawingData>>> realDrawingData = {};
 
     /// 유저 별로 그림을 따로 그려줍니다.
@@ -942,30 +987,52 @@ class _WhiteBoardState extends State<_WhiteBoard> {
       /// 유저 ID를 먼저 가져옵니다.
       final userID = drawingData.key;
 
-      /// 완성된 스트로크는 이미지로 캐싱되므로,
-      /// 마지막으로 캐시된 limitCursor 이후의 스트로크만 반환합니다.
-      final startIndex = lastCachedLimitCursor[userID] ?? 0;
-      final endIndex = widget.userLimitCursor[userID]!;
-
-      if (startIndex < endIndex) {
-        final currentStrokes =
-            widget.userDrawingData[userID]!.sublist(startIndex, endIndex);
+      // 지우개 모드일 때는 모든 스트로크를 반환
+      if (widget.penType == PenType.penEraser ||
+          widget.penType == PenType.strokeEraser) {
+        final allStrokes = List<List<DrawingData>>.from(widget
+            .userDrawingData[userID]!
+            .sublist(0, widget.userLimitCursor[userID]!));
 
         // 삭제된 스트로크 처리
-        for (int i = 0; i < currentStrokes.length; i++) {
+        for (int i = 0; i < allStrokes.length; i++) {
           for (final deleteStroke
               in widget.userDeletedStrokes[userID]!.entries) {
             if (deleteStroke.key <= widget.userLimitCursor[userID]!) {
               final strokeIndex = deleteStroke.value;
-              if (strokeIndex >= startIndex && strokeIndex < endIndex) {
-                currentStrokes[strokeIndex - startIndex] = [];
+              if (strokeIndex == i) {
+                allStrokes[i] = [];
               }
             }
           }
         }
-        realDrawingData[userID] = currentStrokes;
+        realDrawingData[userID] = allStrokes;
       } else {
-        realDrawingData[userID] = [];
+        /// 완성된 스트로크는 이미지로 캐싱되므로,
+        /// 마지막으로 캐시된 limitCursor 이후의 스트로크만 반환합니다.
+        final startIndex = lastCachedLimitCursor[userID] ?? 0;
+        final endIndex = widget.userLimitCursor[userID]!;
+
+        if (startIndex < endIndex) {
+          final currentStrokes =
+              widget.userDrawingData[userID]!.sublist(startIndex, endIndex);
+
+          // 삭제된 스트로크 처리
+          for (int i = 0; i < currentStrokes.length; i++) {
+            for (final deleteStroke
+                in widget.userDeletedStrokes[userID]!.entries) {
+              if (deleteStroke.key <= widget.userLimitCursor[userID]!) {
+                final strokeIndex = deleteStroke.value;
+                if (strokeIndex >= startIndex && strokeIndex < endIndex) {
+                  currentStrokes[strokeIndex - startIndex] = [];
+                }
+              }
+            }
+          }
+          realDrawingData[userID] = currentStrokes;
+        } else {
+          realDrawingData[userID] = [];
+        }
       }
     }
     return realDrawingData;
@@ -1160,6 +1227,14 @@ class _WhiteBoardState extends State<_WhiteBoard> {
     cachedStrokesImage?.dispose();
     cachedStrokesImage = null;
     lastCachedLimitCursor.clear();
+  }
+
+  /// 외부에서 캐시를 무효화하기 위한 public 메서드
+  void invalidateCache() {
+    _invalidateCache();
+    if (mounted) {
+      setState(() {});
+    }
   }
 }
 
