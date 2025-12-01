@@ -771,9 +771,13 @@ class _WhiteBoardState extends State<_WhiteBoard> {
 
       // limitCursor가 감소하면 (Undo) 캐시를 무효화
       if (currentLimit < lastCached) {
+        // 즉시 캐시를 무효화하여 dispose된 이미지가 paint에 전달되지 않도록 함
+        // addPostFrameCallback을 사용하여 build 메서드 완료 후 상태 업데이트
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
-            _invalidateCache();
+            setState(() {
+              _invalidateCache();
+            });
           }
         });
         break;
@@ -789,9 +793,13 @@ class _WhiteBoardState extends State<_WhiteBoard> {
       }
     }
     if (allEmpty && cachedStrokesImage != null) {
+      // 즉시 캐시를 무효화하여 dispose된 이미지가 paint에 전달되지 않도록 함
+      // addPostFrameCallback을 사용하여 build 메서드 완료 후 상태 업데이트
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          _invalidateCache();
+          setState(() {
+            _invalidateCache();
+          });
         }
       });
     }
@@ -963,6 +971,15 @@ class _WhiteBoardState extends State<_WhiteBoard> {
     return realDrawingData;
   }
 
+  /// 이미지가 유효한지 확인하는 헬퍼 메서드
+  /// dispose된 이미지는 paint할 수 없으므로 확인이 필요합니다.
+  bool _isImageValid(ui.Image? image) {
+    if (image == null) return false;
+    // debugGetOpenHandleStackTraces()가 null이 아니고 비어있지 않으면 이미지가 유효함
+    // null이거나 비어있으면 이미 dispose된 이미지
+    return image.debugGetOpenHandleStackTraces()?.isNotEmpty ?? false;
+  }
+
   /// 완성된 스트로크를 이미지로 변환하여 캐싱합니다.
   /// 이렇게 하면 많은 스트로크가 있어도 성능 저하를 방지할 수 있습니다.
   Future<void> _cacheCompletedStrokes() async {
@@ -1025,7 +1042,8 @@ class _WhiteBoardState extends State<_WhiteBoard> {
     canvas.scale(devicePixelRatio, devicePixelRatio);
 
     // 기존 캐시된 이미지가 있으면 먼저 그리기
-    if (cachedStrokesImage != null) {
+    // 이미지가 dispose되었는지 확인 후에만 paint
+    if (cachedStrokesImage != null && _isImageValid(cachedStrokesImage)) {
       paintImage(
         canvas: canvas,
         rect: Offset.zero & size,
@@ -1152,10 +1170,20 @@ class _WhiteboardPainter extends CustomPainter {
 
   _WhiteboardPainter(this.userDrawingData,
       [this.backgroundImage, this.cachedStrokesImage]);
+
+  /// 이미지가 유효한지 확인하는 헬퍼 메서드
+  /// dispose된 이미지는 paint할 수 없으므로 확인이 필요합니다.
+  bool _isImageValid(ui.Image? image) {
+    if (image == null) return false;
+    // debugGetOpenHandleStackTraces()가 null이 아니고 비어있지 않으면 이미지가 유효함
+    // null이거나 비어있으면 이미 dispose된 이미지
+    return image.debugGetOpenHandleStackTraces()?.isNotEmpty ?? false;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     // 배경 이미지 그리기
-    if (backgroundImage != null) {
+    if (backgroundImage != null && _isImageValid(backgroundImage)) {
       paintImage(
         canvas: canvas,
         rect: Offset.zero & size,
@@ -1166,7 +1194,8 @@ class _WhiteboardPainter extends CustomPainter {
     }
 
     // 캐시된 완성된 스트로크 이미지 그리기
-    if (cachedStrokesImage != null) {
+    // 이미지가 dispose되었는지 확인 후에만 paint
+    if (cachedStrokesImage != null && _isImageValid(cachedStrokesImage)) {
       paintImage(
         canvas: canvas,
         rect: Offset.zero & size,
