@@ -6,7 +6,7 @@ import 'package:math_tutor_whiteboard/change_notifier_builder.dart';
 import 'package:math_tutor_whiteboard/states/chat_message_state.dart';
 import 'package:math_tutor_whiteboard/whiteboard_controller.dart';
 import 'popups/chat_message_bottom_sheet.dart';
-import 'popups/media_source_selection_bottom_sheet.dart';
+// import 'popups/media_source_selection_bottom_sheet.dart';
 import 'popups/tool_selection_popup.dart';
 import 'popups/user_list_bottom_sheet.dart';
 import 'types/types.dart';
@@ -124,25 +124,25 @@ class _WhiteboardControllerState
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          if (widget.canLoadImage)
-                           Expanded(
-                              child: InkWell(
-                                onTap: () {
-                                  // Show modal bottom sheet to choose camera or gallery
-                                  showModalBottomSheet(
-                                    context: context,
-                                    backgroundColor: Colors.transparent,
-                                    builder: (context) =>
-                                        MediaSourceSelectionBottomSheet(
-                                            onImageSelected: widget.onLoadImage),
-                                  );
-                                },
-                                child: SvgPicture.asset(
-                                  'assets/file.svg',
-                                  package: 'math_tutor_whiteboard',
-                                ),
-                              ),
-                            ),
+                          // if (widget.canLoadImage)
+                          //  Expanded(
+                          //     child: InkWell(
+                          //       onTap: () {
+                          //         // Show modal bottom sheet to choose camera or gallery
+                          //         showModalBottomSheet(
+                          //           context: context,
+                          //           backgroundColor: Colors.transparent,
+                          //           builder: (context) =>
+                          //               MediaSourceSelectionBottomSheet(
+                          //                   onImageSelected: widget.onLoadImage),
+                          //         );
+                          //       },
+                          //       child: SvgPicture.asset(
+                          //         'assets/file.svg',
+                          //         package: 'math_tutor_whiteboard',
+                          //       ),
+                          //     ),
+                          //   ),
                           Expanded(
                             child: GestureDetector(
                               behavior: HitTestBehavior.opaque,
@@ -250,7 +250,7 @@ class _WhiteboardControllerState
     );
   }
 
-  _toolButtonBuilder() {
+  StatelessWidget _toolButtonBuilder() {
     switch (widget.penType) {
       case PenType.highlighter:
         return Icon(FontAwesomeIcons.highlighter,
@@ -267,10 +267,12 @@ class _WhiteboardControllerState
         return SvgPicture.asset('assets/eraser.svg',
             package: 'math_tutor_whiteboard');
       default:
+        return Icon(FontAwesomeIcons.pen,
+            color: widget.selectedColor, size: 20);
     }
   }
 
-  showToolSelectionPopup(BuildContext context, Offset position) {
+  Future showToolSelectionPopup(BuildContext context, Offset position) {
     return Navigator.of(context).push(PageRouteBuilder(
       opaque: false,
       pageBuilder: (context, animation, secondaryAnimation) {
@@ -287,7 +289,7 @@ class _WhiteboardControllerState
     ));
   }
 
-  showUserlistModalBottomSheet(BuildContext context) {
+  void showUserlistModalBottomSheet(BuildContext context) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -302,7 +304,7 @@ class _WhiteboardControllerState
     );
   }
 
-  showChatModalBottomSheet(BuildContext context) async {
+  Future<void> showChatModalBottomSheet(BuildContext context) async {
     final notifier = ref.watch(chatMessageStateProvider.notifier);
     notifier.checkLastMessageTime();
     notifier.setSeeingChat(true);
