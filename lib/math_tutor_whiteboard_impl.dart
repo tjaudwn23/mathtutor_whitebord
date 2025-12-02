@@ -1080,11 +1080,20 @@ class _WhiteBoardState extends State<_WhiteBoard> {
 
   /// 이미지가 유효한지 확인하는 헬퍼 메서드
   /// dispose된 이미지는 paint할 수 없으므로 확인이 필요합니다.
+  /// release 모드에서도 작동하도록 width와 height를 확인합니다.
   bool _isImageValid(ui.Image? image) {
     if (image == null) return false;
-    // debugGetOpenHandleStackTraces()가 null이 아니고 비어있지 않으면 이미지가 유효함
-    // null이거나 비어있으면 이미 dispose된 이미지
-    return image.debugGetOpenHandleStackTraces()?.isNotEmpty ?? false;
+    try {
+      // release 모드에서도 작동하도록 width와 height를 확인
+      // dispose된 이미지는 width나 height 접근 시 예외가 발생할 수 있음
+      final width = image.width;
+      final height = image.height;
+      // width와 height가 유효한 값인지 확인 (0보다 크고 유한한 값)
+      return width > 0 && height > 0 && width.isFinite && height.isFinite;
+    } catch (e) {
+      // 예외가 발생하면 이미지가 dispose되었거나 유효하지 않음
+      return false;
+    }
   }
 
   /// 이미지 변환 시작 전에 pendingCacheLimitCursor를 설정합니다.
@@ -1371,11 +1380,20 @@ class _WhiteboardPainter extends CustomPainter {
 
   /// 이미지가 유효한지 확인하는 헬퍼 메서드
   /// dispose된 이미지는 paint할 수 없으므로 확인이 필요합니다.
+  /// release 모드에서도 작동하도록 width와 height를 확인합니다.
   bool _isImageValid(ui.Image? image) {
     if (image == null) return false;
-    // debugGetOpenHandleStackTraces()가 null이 아니고 비어있지 않으면 이미지가 유효함
-    // null이거나 비어있으면 이미 dispose된 이미지
-    return image.debugGetOpenHandleStackTraces()?.isNotEmpty ?? false;
+    try {
+      // release 모드에서도 작동하도록 width와 height를 확인
+      // dispose된 이미지는 width나 height 접근 시 예외가 발생할 수 있음
+      final width = image.width;
+      final height = image.height;
+      // width와 height가 유효한 값인지 확인 (0보다 크고 유한한 값)
+      return width > 0 && height > 0 && width.isFinite && height.isFinite;
+    } catch (e) {
+      // 예외가 발생하면 이미지가 dispose되었거나 유효하지 않음
+      return false;
+    }
   }
 
   @override
