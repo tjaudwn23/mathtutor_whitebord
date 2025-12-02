@@ -746,6 +746,8 @@ class _WhiteBoardState extends State<_WhiteBoard> {
   ui.Image? cachedStrokesImage; // 완성된 스트로크를 이미지로 캐싱
   Map<String, int> lastCachedLimitCursor =
       {}; // 마지막으로 캐시된 limitCursor 추적 (사용자별)
+  Map<String, int> pendingCacheLimitCursor =
+      {}; // 이미지 변환 중인 limitCursor 추적 (사용자별)
   Size? _whiteboardSize; // 화이트보드의 실제 크기 저장
 
   @override
@@ -907,6 +909,8 @@ class _WhiteBoardState extends State<_WhiteBoard> {
                     // 지우개 모드에서는 모든 스트로크를 실시간으로 그려야 하므로 캐싱하지 않음
                     if (widget.penType != PenType.penEraser &&
                         widget.penType != PenType.strokeEraser) {
+                      // 이미지 변환 시작 전에 pendingCacheLimitCursor 설정
+                      _prepareCacheForStrokes();
                       _cacheCompletedStrokes();
                     }
                   } else {
@@ -917,6 +921,8 @@ class _WhiteBoardState extends State<_WhiteBoard> {
                       // 지우개 모드에서는 모든 스트로크를 실시간으로 그려야 하므로 캐싱하지 않음
                       if (widget.penType != PenType.penEraser &&
                           widget.penType != PenType.strokeEraser) {
+                        // 이미지 변환 시작 전에 pendingCacheLimitCursor 설정
+                        _prepareCacheForStrokes();
                         _cacheCompletedStrokes();
                       }
                     }
@@ -953,10 +959,13 @@ class _WhiteBoardState extends State<_WhiteBoard> {
                               _makeRealDrawingData(),
                               widget.backgroundImage,
                               // 지우개 모드일 때는 캐시된 이미지를 사용하지 않음
+                              // 또한 이미지가 유효하지 않으면 null로 전달하여 스트로크를 그리도록 함
                               (widget.penType == PenType.penEraser ||
                                       widget.penType == PenType.strokeEraser)
                                   ? null
-                                  : cachedStrokesImage),
+                                  : (_isImageValid(cachedStrokesImage)
+                                      ? cachedStrokesImage
+                                      : null)),
                           size: actualSize,
                           child: Container(
                             color: Colors.transparent,
@@ -1010,26 +1019,57 @@ class _WhiteBoardState extends State<_WhiteBoard> {
       } else {
         /// 완성된 스트로크는 이미지로 캐싱되므로,
         /// 마지막으로 캐시된 limitCursor 이후의 스트로크만 반환합니다.
+        /// 단, 이미지 변환이 진행 중이거나 이미지가 유효하지 않은 경우에는
+        /// 해당 스트로크도 계속 반환하여 화면에 표시되도록 합니다.
         final startIndex = lastCachedLimitCursor[userID] ?? 0;
         final endIndex = widget.userLimitCursor[userID]!;
+        final pendingCache = pendingCacheLimitCursor[userID];
 
-        if (startIndex < endIndex) {
-          final currentStrokes =
-              widget.userDrawingData[userID]!.sublist(startIndex, endIndex);
+        // 캐시된 이미지가 유효한지 확인
+        final hasValidCachedImage = _isImageValid(cachedStrokesImage);
 
-          // 삭제된 스트로크 처리
-          for (int i = 0; i < currentStrokes.length; i++) {
-            for (final deleteStroke
-                in widget.userDeletedStrokes[userID]!.entries) {
-              if (deleteStroke.key <= widget.userLimitCursor[userID]!) {
-                final strokeIndex = deleteStroke.value;
-                if (strokeIndex >= startIndex && strokeIndex < endIndex) {
-                  currentStrokes[strokeIndex - startIndex] = [];
+        // release 모드에서도 안정적으로 작동하도록:
+        // 1. 캐시된 이미지가 없거나 유효하지 않으면 모든 스트로크 반환
+        // 2. pendingCache가 있으면 그것과 endIndex 중 더 큰 값 사용
+        // 3. 그 외의 경우 endIndex까지의 스트로크 반환
+        final effectiveStartIndex =
+            (hasValidCachedImage && pendingCache == null)
+                ? startIndex
+                : 0; // 이미지가 없으면 처음부터 모든 스트로크 반환
+
+        final effectiveEndIndex =
+            (pendingCache != null && pendingCache > endIndex)
+                ? pendingCache
+                : endIndex;
+
+        // effectiveStartIndex가 effectiveEndIndex보다 작으면 스트로크 반환
+        if (effectiveStartIndex < effectiveEndIndex) {
+          // 배열 범위 체크 추가 (release 모드에서 안전성 향상)
+          final dataLength = widget.userDrawingData[userID]!.length;
+          final safeEndIndex =
+              effectiveEndIndex > dataLength ? dataLength : effectiveEndIndex;
+
+          if (effectiveStartIndex < safeEndIndex) {
+            final currentStrokes = widget.userDrawingData[userID]!
+                .sublist(effectiveStartIndex, safeEndIndex);
+
+            // 삭제된 스트로크 처리
+            for (int i = 0; i < currentStrokes.length; i++) {
+              for (final deleteStroke
+                  in widget.userDeletedStrokes[userID]!.entries) {
+                if (deleteStroke.key <= widget.userLimitCursor[userID]!) {
+                  final strokeIndex = deleteStroke.value;
+                  if (strokeIndex >= effectiveStartIndex &&
+                      strokeIndex < safeEndIndex) {
+                    currentStrokes[strokeIndex - effectiveStartIndex] = [];
+                  }
                 }
               }
             }
+            realDrawingData[userID] = currentStrokes;
+          } else {
+            realDrawingData[userID] = [];
           }
-          realDrawingData[userID] = currentStrokes;
         } else {
           realDrawingData[userID] = [];
         }
@@ -1045,6 +1085,40 @@ class _WhiteBoardState extends State<_WhiteBoard> {
     // debugGetOpenHandleStackTraces()가 null이 아니고 비어있지 않으면 이미지가 유효함
     // null이거나 비어있으면 이미 dispose된 이미지
     return image.debugGetOpenHandleStackTraces()?.isNotEmpty ?? false;
+  }
+
+  /// 이미지 변환 시작 전에 pendingCacheLimitCursor를 설정합니다.
+  /// 이렇게 하면 이미지 변환이 완료되기 전까지 스트로크가 화면에 표시됩니다.
+  void _prepareCacheForStrokes() {
+    if (!mounted) return;
+
+    bool needsUpdate = false;
+    for (final entry in widget.userDrawingData.entries) {
+      final userID = entry.key;
+      final lastCached = lastCachedLimitCursor[userID] ?? 0;
+      final currentLimit = widget.userLimitCursor[userID] ?? 0;
+
+      if (currentLimit > lastCached) {
+        final currentPending = pendingCacheLimitCursor[userID];
+        // pendingCacheLimitCursor가 설정되지 않았거나 더 작은 값이면 업데이트
+        if (currentPending == null || currentPending < currentLimit) {
+          pendingCacheLimitCursor[userID] = currentLimit;
+          needsUpdate = true;
+        }
+      }
+    }
+
+    // setState를 호출하여 즉시 UI 업데이트
+    // release 모드에서도 작동하도록 WidgetsBinding.instance.addPostFrameCallback 사용
+    if (needsUpdate && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          setState(() {});
+        }
+      });
+      // 즉시 업데이트도 시도
+      setState(() {});
+    }
   }
 
   /// 완성된 스트로크를 이미지로 변환하여 캐싱합니다.
@@ -1241,10 +1315,14 @@ class _WhiteBoardState extends State<_WhiteBoard> {
       cachedStrokesImage = image;
       oldImage?.dispose();
 
-      // 마지막 캐시된 limitCursor 업데이트 (setState 없이 직접 업데이트)
+      // 마지막 캐시된 limitCursor 업데이트
+      // 이미지 변환이 완료되었으므로 pendingCacheLimitCursor도 업데이트
       for (final entry in widget.userDrawingData.entries) {
         final userID = entry.key;
-        lastCachedLimitCursor[userID] = widget.userLimitCursor[userID] ?? 0;
+        final currentLimit = widget.userLimitCursor[userID] ?? 0;
+        lastCachedLimitCursor[userID] = currentLimit;
+        // 이미지 변환이 완료되었으므로 pendingCacheLimitCursor 제거
+        pendingCacheLimitCursor.remove(userID);
       }
       // UI 업데이트를 위해 setState 호출
       if (mounted) {
@@ -1254,6 +1332,15 @@ class _WhiteBoardState extends State<_WhiteBoard> {
       // 이미지 변환 실패 시 에러 로깅 및 정리
       picture.dispose();
       log('Error converting strokes to image: $e');
+      // 이미지 변환 실패 시에도 pendingCacheLimitCursor 제거하여
+      // 스트로크가 계속 표시되도록 함
+      for (final entry in widget.userDrawingData.entries) {
+        final userID = entry.key;
+        pendingCacheLimitCursor.remove(userID);
+      }
+      if (mounted) {
+        setState(() {});
+      }
     }
   }
 
@@ -1262,6 +1349,7 @@ class _WhiteBoardState extends State<_WhiteBoard> {
     cachedStrokesImage?.dispose();
     cachedStrokesImage = null;
     lastCachedLimitCursor.clear();
+    pendingCacheLimitCursor.clear();
   }
 
   /// 외부에서 캐시를 무효화하기 위한 public 메서드
