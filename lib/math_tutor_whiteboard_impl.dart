@@ -1097,9 +1097,32 @@ class _WhiteBoardState extends State<_WhiteBoard> {
     }
 
     // devicePixelRatio를 고려하여 고해상도 이미지 생성
-    final devicePixelRatio = View.of(context).devicePixelRatio;
+    // release 모드에서도 안정적으로 작동하도록 MediaQuery 사용
+    // View.of(context)는 release 모드에서 불안정할 수 있으므로 MediaQuery 사용
+    double devicePixelRatio;
+    try {
+      // MediaQuery는 release 모드에서도 안정적으로 작동함
+      devicePixelRatio = MediaQuery.maybeOf(context)?.devicePixelRatio ?? 1.0;
+    } catch (e) {
+      // MediaQuery 접근 실패 시 기본값 사용
+      devicePixelRatio = 1.0;
+    }
+
+    // devicePixelRatio가 유효하지 않으면 기본값 사용
+    if (devicePixelRatio <= 0 ||
+        devicePixelRatio.isNaN ||
+        devicePixelRatio.isInfinite) {
+      devicePixelRatio = 1.0;
+    }
+
     final imageWidth = (size.width * devicePixelRatio).toInt();
     final imageHeight = (size.height * devicePixelRatio).toInt();
+
+    // 이미지 크기가 유효한지 먼저 확인
+    if (imageWidth <= 0 || imageHeight <= 0) {
+      log('Invalid image size: $imageWidth x $imageHeight');
+      return;
+    }
 
     // 이미지를 비동기로 생성
     final recorder = ui.PictureRecorder();
@@ -1197,28 +1220,40 @@ class _WhiteBoardState extends State<_WhiteBoard> {
     // 이미지로 변환 (고해상도)
     final picture = recorder.endRecording();
 
-    // 이미지 크기가 유효한지 확인
-    if (imageWidth <= 0 || imageHeight <= 0) {
+    // 비동기 이미지 변환 시 위젯이 dispose되었는지 확인
+    if (!mounted) {
       picture.dispose();
       return;
     }
 
-    final image = await picture.toImage(imageWidth, imageHeight);
-    picture.dispose();
+    try {
+      final image = await picture.toImage(imageWidth, imageHeight);
+      picture.dispose();
 
-    // 기존 이미지 해제 및 새 이미지로 교체
-    final oldImage = cachedStrokesImage;
-    cachedStrokesImage = image;
-    oldImage?.dispose();
+      // 이미지 변환 후에도 위젯이 여전히 마운트되어 있는지 확인
+      if (!mounted) {
+        image.dispose();
+        return;
+      }
 
-    // 마지막 캐시된 limitCursor 업데이트 (setState 없이 직접 업데이트)
-    if (mounted) {
+      // 기존 이미지 해제 및 새 이미지로 교체
+      final oldImage = cachedStrokesImage;
+      cachedStrokesImage = image;
+      oldImage?.dispose();
+
+      // 마지막 캐시된 limitCursor 업데이트 (setState 없이 직접 업데이트)
       for (final entry in widget.userDrawingData.entries) {
         final userID = entry.key;
         lastCachedLimitCursor[userID] = widget.userLimitCursor[userID] ?? 0;
       }
       // UI 업데이트를 위해 setState 호출
-      setState(() {});
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (e) {
+      // 이미지 변환 실패 시 에러 로깅 및 정리
+      picture.dispose();
+      log('Error converting strokes to image: $e');
     }
   }
 
